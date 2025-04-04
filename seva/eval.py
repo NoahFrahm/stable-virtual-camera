@@ -1972,3 +1972,491 @@ def run_one_scene(
     )
     video_path_1 = os.path.join(save_path, "samples-rgb.mp4")
     yield video_path_1
+
+
+def run_one_scene_one_pass(
+    task,
+    version_dict,
+    model,
+    ae,
+    conditioner,
+    denoiser,
+    image_cond,
+    camera_cond,
+    save_path,
+    use_traj_prior,
+    traj_prior_Ks,
+    traj_prior_c2ws,
+    seed=23,
+    gradio=False,
+    abort_event=None,
+    first_pass_pbar=None,
+    second_pass_pbar=None,
+):
+    H, W, T, C, F, options = (
+        version_dict["H"],
+        version_dict["W"],
+        version_dict["T"],
+        version_dict["C"],
+        version_dict["f"],
+        version_dict["options"],
+    )
+
+    if isinstance(image_cond, str):
+        image_cond = {"img": [image_cond]}
+    imgs_clip, imgs, img_size = [], [], None
+    for i, (img, K) in enumerate(zip(image_cond["img"], camera_cond["K"])):
+        if isinstance(img, str) or img is None:
+            img, K = load_img_and_K(img or img_size, None, K=K, device="cpu")  # type: ignore
+            img_size = img.shape[-2:]
+            if options.get("L_short", -1) == -1:
+                img, K = transform_img_and_K(
+                    img,
+                    (W, H),
+                    K=K[None],
+                    mode=(
+                        options.get("transform_input", "crop")
+                        if i in image_cond["input_indices"]
+                        else options.get("transform_target", "crop")
+                    ),
+                    scale=(
+                        1.0
+                        if i in image_cond["input_indices"]
+                        else options.get("transform_scale", 1.0)
+                    ),
+                )
+            else:
+                downsample = 3
+                assert options["L_short"] % F * 2**downsample == 0, (
+                    "Short side of the image should be divisible by "
+                    f"F*2**{downsample}={F * 2**downsample}."
+                )
+                img, K = transform_img_and_K(
+                    img,
+                    options["L_short"],
+                    K=K[None],
+                    size_stride=F * 2**downsample,
+                    mode=(
+                        options.get("transform_input", "crop")
+                        if i in image_cond["input_indices"]
+                        else options.get("transform_target", "crop")
+                    ),
+                    scale=(
+                        1.0
+                        if i in image_cond["input_indices"]
+                        else options.get("transform_scale", 1.0)
+                    ),
+                )
+                version_dict["W"] = W = img.shape[-1]
+                version_dict["H"] = H = img.shape[-2]
+            K = K[0]
+            K[0] /= W
+            K[1] /= H
+            camera_cond["K"][i] = K
+            img_clip = img
+        elif isinstance(img, np.ndarray):
+            img_size = torch.Size(img.shape[:2])
+            img = torch.as_tensor(img).permute(2, 0, 1)
+            img = img.unsqueeze(0)
+            img = img / 255.0 * 2.0 - 1.0
+            if not gradio:
+                img, K = transform_img_and_K(img, (W, H), K=K[None])
+                assert K is not None
+                K = K[0]
+            K[0] /= W
+            K[1] /= H
+            camera_cond["K"][i] = K
+            img_clip = img
+        else:
+            assert (
+                False
+            ), f"Variable `img` got {type(img)} type which is not supported!!!"
+        imgs_clip.append(img_clip)
+        imgs.append(img)
+    imgs_clip = torch.cat(imgs_clip, dim=0)
+    imgs = torch.cat(imgs, dim=0)
+
+    if traj_prior_Ks is not None:
+        assert img_size is not None
+        for i, prior_k in enumerate(traj_prior_Ks):
+            img, prior_k = load_img_and_K(img_size, None, K=prior_k, device="cpu")  # type: ignore
+            img, prior_k = transform_img_and_K(
+                img,
+                (W, H),
+                K=prior_k[None],
+                mode=options.get(
+                    "transform_target", "crop"
+                ),  # mode for prior is always same as target
+                scale=options.get(
+                    "transform_scale", 1.0
+                ),  # scale for prior is always same as target
+            )
+            prior_k = prior_k[0]
+            prior_k[0] /= W
+            prior_k[1] /= H
+            traj_prior_Ks[i] = prior_k
+
+    options["num_frames"] = T
+    discretization = denoiser.discretization
+    torch.cuda.empty_cache()
+
+    seed_everything(seed)
+
+    # Get Data
+    input_indices = image_cond["input_indices"]
+    input_imgs = imgs[input_indices]
+    input_imgs_clip = imgs_clip[input_indices]
+    input_c2ws = camera_cond["c2w"][input_indices]
+    input_Ks = camera_cond["K"][input_indices]
+
+    test_indices = [i for i in range(len(imgs)) if i not in input_indices]
+    test_imgs = imgs[test_indices]
+    test_imgs_clip = imgs_clip[test_indices]
+    test_c2ws = camera_cond["c2w"][test_indices]
+    test_Ks = camera_cond["K"][test_indices]
+
+    if options.get("save_input", True):
+        save_output(
+            {"/image": input_imgs},
+            save_path=os.path.join(save_path, "input"),
+            video_save_fps=2,
+        )
+
+    if not use_traj_prior:
+        chunk_strategy = options.get("chunk_strategy", "gt")
+
+        (
+            _,
+            input_inds_per_chunk,
+            input_sels_per_chunk,
+            test_inds_per_chunk,
+            test_sels_per_chunk,
+        ) = chunk_input_and_test(
+            T,
+            input_c2ws,
+            test_c2ws,
+            input_indices,
+            test_indices,
+            options=options,
+            task=task,
+            chunk_strategy=chunk_strategy,
+            gt_input_inds=list(range(input_c2ws.shape[0])),
+        )
+        print(
+            f"One pass - chunking with `{chunk_strategy}` strategy: total "
+            f"{len(input_inds_per_chunk)} forward(s) ..."
+        )
+
+        all_samples = {}
+        all_test_inds = []
+        for i, (
+            chunk_input_inds,
+            chunk_input_sels,
+            chunk_test_inds,
+            chunk_test_sels,
+        ) in tqdm(
+            enumerate(
+                zip(
+                    input_inds_per_chunk,
+                    input_sels_per_chunk,
+                    test_inds_per_chunk,
+                    test_sels_per_chunk,
+                )
+            ),
+            total=len(input_inds_per_chunk),
+            leave=False,
+        ):
+            (
+                curr_input_sels,
+                curr_test_sels,
+                curr_input_maps,
+                curr_test_maps,
+            ) = pad_indices(
+                chunk_input_sels,
+                chunk_test_sels,
+                T=T,
+                padding_mode=options.get("t_padding_mode", "last"),
+            )
+            curr_imgs, curr_imgs_clip, curr_c2ws, curr_Ks = [
+                assemble(
+                    input=x[chunk_input_inds],
+                    test=y[chunk_test_inds],
+                    input_maps=curr_input_maps,
+                    test_maps=curr_test_maps,
+                )
+                for x, y in zip(
+                    [
+                        torch.cat(
+                            [
+                                input_imgs,
+                                get_k_from_dict(all_samples, "samples-rgb").to(
+                                    input_imgs.device
+                                ),
+                            ],
+                            dim=0,
+                        ),
+                        torch.cat(
+                            [
+                                input_imgs_clip,
+                                get_k_from_dict(all_samples, "samples-rgb").to(
+                                    input_imgs.device
+                                ),
+                            ],
+                            dim=0,
+                        ),
+                        torch.cat([input_c2ws, test_c2ws[all_test_inds]], dim=0),
+                        torch.cat([input_Ks, test_Ks[all_test_inds]], dim=0),
+                    ],  # procedually append generated prior views to the input views
+                    [test_imgs, test_imgs_clip, test_c2ws, test_Ks],
+                )
+            ]
+            value_dict = get_value_dict(
+                curr_imgs.to("cuda"),
+                curr_imgs_clip.to("cuda"),
+                curr_input_sels
+                + [
+                    sel
+                    for (ind, sel) in zip(
+                        np.array(chunk_test_inds)[curr_test_maps[curr_test_maps != -1]],
+                        curr_test_sels,
+                    )
+                    if test_indices[ind] in image_cond["input_indices"]
+                ],
+                curr_c2ws,
+                curr_Ks,
+                curr_input_sels
+                + [
+                    sel
+                    for (ind, sel) in zip(
+                        np.array(chunk_test_inds)[curr_test_maps[curr_test_maps != -1]],
+                        curr_test_sels,
+                    )
+                    if test_indices[ind] in camera_cond["input_indices"]
+                ],
+                all_c2ws=camera_cond["c2w"],
+                camera_scale=options.get("camera_scale", 2.0),
+            )
+            samplers = create_samplers(
+                options["guider_types"],
+                discretization,
+                [len(curr_imgs)],
+                options["num_steps"],
+                options["cfg_min"],
+                abort_event=abort_event,
+            )
+            assert len(samplers) == 1
+            samples = do_sample(
+                model,
+                ae,
+                conditioner,
+                denoiser,
+                samplers[0],
+                value_dict,
+                H,
+                W,
+                C,
+                F,
+                T=len(curr_imgs),
+                cfg=(
+                    options["cfg"][0]
+                    if isinstance(options["cfg"], (list, tuple))
+                    else options["cfg"]
+                ),
+                **{k: options[k] for k in options if k not in ["cfg", "T"]},
+            )
+            samples = decode_output(
+                samples, len(curr_imgs), chunk_test_sels
+            )  # decode into dict
+            if options.get("save_first_pass", False):
+                save_output(
+                    replace_or_include_input_for_dict(
+                        samples,
+                        chunk_test_sels,
+                        curr_imgs,
+                        curr_c2ws,
+                        curr_Ks,
+                    ),
+                    save_path=os.path.join(save_path, "first-pass", f"forward_{i}"),
+                    video_save_fps=2,
+                )
+            extend_dict(all_samples, samples)
+            all_test_inds.extend(chunk_test_inds)
+    else:
+        assert traj_prior_c2ws is not None, (
+            "`traj_prior_c2ws` should be set when using 2-pass sampling. One "
+            "potential reason is that the amount of input frames is larger than "
+            "T. Set `num_prior_frames` manually to overwrite the infered stats."
+        )
+        traj_prior_c2ws = torch.as_tensor(
+            traj_prior_c2ws,
+            device=input_c2ws.device,
+            dtype=input_c2ws.dtype,
+        )
+
+        if traj_prior_Ks is None:
+            traj_prior_Ks = test_Ks[:1].repeat_interleave(
+                traj_prior_c2ws.shape[0], dim=0
+            )
+
+        traj_prior_imgs = imgs.new_zeros(traj_prior_c2ws.shape[0], *imgs.shape[1:])
+        traj_prior_imgs_clip = imgs_clip.new_zeros(
+            traj_prior_c2ws.shape[0], *imgs_clip.shape[1:]
+        )
+
+        # ---------------------------------- first pass ----------------------------------
+        T_first_pass = T[0] if isinstance(T, (list, tuple)) else T
+        T_second_pass = T[1] if isinstance(T, (list, tuple)) else T
+        chunk_strategy_first_pass = options.get(
+            "chunk_strategy_first_pass", "gt-nearest"
+        )
+        (
+            _,
+            input_inds_per_chunk,
+            input_sels_per_chunk,
+            prior_inds_per_chunk,
+            prior_sels_per_chunk,
+        ) = chunk_input_and_test(
+            T_first_pass,
+            input_c2ws,
+            traj_prior_c2ws,
+            input_indices,
+            image_cond["prior_indices"],
+            options=options,
+            task=task,
+            chunk_strategy=chunk_strategy_first_pass,
+            gt_input_inds=list(range(input_c2ws.shape[0])),
+        )
+        print(
+            f"Two passes (first) - chunking with `{chunk_strategy_first_pass}` strategy: total "
+            f"{len(input_inds_per_chunk)} forward(s) ..."
+        )
+
+        all_samples = {}
+        all_prior_inds = []
+        for i, (
+            chunk_input_inds,
+            chunk_input_sels,
+            chunk_prior_inds,
+            chunk_prior_sels,
+        ) in tqdm(
+            enumerate(
+                zip(
+                    input_inds_per_chunk,
+                    input_sels_per_chunk,
+                    prior_inds_per_chunk,
+                    prior_sels_per_chunk,
+                )
+            ),
+            total=len(input_inds_per_chunk),
+            leave=False,
+        ):
+            (
+                curr_input_sels,
+                curr_prior_sels,
+                curr_input_maps,
+                curr_prior_maps,
+            ) = pad_indices(
+                chunk_input_sels,
+                chunk_prior_sels,
+                T=T_first_pass,
+                padding_mode=options.get("t_padding_mode", "last"),
+            )
+            curr_imgs, curr_imgs_clip, curr_c2ws, curr_Ks = [
+                assemble(
+                    input=x[chunk_input_inds],
+                    test=y[chunk_prior_inds],
+                    input_maps=curr_input_maps,
+                    test_maps=curr_prior_maps,
+                )
+                for x, y in zip(
+                    [
+                        torch.cat(
+                            [
+                                input_imgs,
+                                get_k_from_dict(all_samples, "samples-rgb").to(
+                                    input_imgs.device
+                                ),
+                            ],
+                            dim=0,
+                        ),
+                        torch.cat(
+                            [
+                                input_imgs_clip,
+                                get_k_from_dict(all_samples, "samples-rgb").to(
+                                    input_imgs.device
+                                ),
+                            ],
+                            dim=0,
+                        ),
+                        torch.cat([input_c2ws, traj_prior_c2ws[all_prior_inds]], dim=0),
+                        torch.cat([input_Ks, traj_prior_Ks[all_prior_inds]], dim=0),
+                    ],  # procedually append generated prior views to the input views
+                    [
+                        traj_prior_imgs,
+                        traj_prior_imgs_clip,
+                        traj_prior_c2ws,
+                        traj_prior_Ks,
+                    ],
+                )
+            ]
+            value_dict = get_value_dict(
+                curr_imgs.to("cuda"),
+                curr_imgs_clip.to("cuda"),
+                curr_input_sels,
+                curr_c2ws,
+                curr_Ks,
+                list(range(T_first_pass)),
+                all_c2ws=camera_cond["c2w"],
+                camera_scale=options.get("camera_scale", 2.0),
+            )
+            samplers = create_samplers(
+                options["guider_types"],
+                discretization,
+                [T_first_pass, T_second_pass],
+                options["num_steps"],
+                options["cfg_min"],
+                abort_event=abort_event,
+            )
+            samples = do_sample(
+                model,
+                ae,
+                conditioner,
+                denoiser,
+                (
+                    samplers[1]
+                    if len(samplers) > 1
+                    and options.get("ltr_first_pass", False)
+                    and chunk_strategy_first_pass != "gt"
+                    and i > 0
+                    else samplers[0]
+                ),
+                value_dict,
+                H,
+                W,
+                C,
+                F,
+                cfg=(
+                    options["cfg"][0]
+                    if isinstance(options["cfg"], (list, tuple))
+                    else options["cfg"]
+                ),
+                T=T_first_pass,
+                global_pbar=first_pass_pbar,
+                **{k: options[k] for k in options if k not in ["cfg", "T", "sampler"]},
+            )
+            if samples is None:
+                return
+            samples = decode_output(
+                samples, T_first_pass, chunk_prior_sels
+            )  # decode into dict
+            extend_dict(all_samples, samples)
+            all_prior_inds.extend(chunk_prior_inds)
+
+        if options.get("save_first_pass", True):
+            save_output(
+                all_samples,
+                save_path=os.path.join(save_path, "first-pass"),
+                video_save_fps=5,
+            )
+            video_path_0 = os.path.join(save_path, "first-pass", "samples-rgb.mp4")
+            yield video_path_0

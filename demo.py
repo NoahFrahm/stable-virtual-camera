@@ -17,6 +17,7 @@ from seva.eval import (
     infer_prior_inds,
     infer_prior_stats,
     run_one_scene,
+    run_one_scene_one_pass
 )
 from seva.geometry import (
     generate_interpolated_path,
