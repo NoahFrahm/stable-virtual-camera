@@ -57,7 +57,7 @@ VERSION_DICT = {
     "T": 21,
     "C": 4,
     "f": 8,
-    "options": {},
+    "options": {"save_first_pass": True},
 }
 
 if COMPILE:
@@ -276,7 +276,7 @@ def main(
     data_path,
     data_items=None,
     task="img2img",
-    save_subdir="",
+    save_subdir="vggt_prepped",
     H=None,
     W=None,
     T=None,
@@ -358,7 +358,9 @@ def main(
             "input_indices": list(range(num_inputs + num_targets)),
         }
         # run_one_scene -> transform_img_and_K modifies VERSION_DICT["H"] and VERSION_DICT["W"] in-place.
-        video_path_generator = run_one_scene(
+        run_one_scene_one_pass
+        # video_path_generator = run_one_scene(
+        video_path_generator = run_one_scene_one_pass(
             task,
             VERSION_DICT,  # H, W maybe updated in run_one_scene
             model=MODEL,
