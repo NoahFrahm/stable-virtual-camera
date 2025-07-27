@@ -366,7 +366,7 @@ class ReconfusionParser(BaseParser):
                 applied_transform = np.concatenate(
                     [metadata["applied_transform"], [[0, 0, 0, 1]]], axis=0
                 )
-                camtoworld = applied_transform @ camtoworld
+                camtoworld = np.linalg.inv(applied_transform) @ camtoworld
             camtoworlds.append(camtoworld)
         camtoworlds = np.array(camtoworlds)
         camtoworlds[:, :, [1, 2]] *= -1

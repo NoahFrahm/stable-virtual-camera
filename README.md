@@ -14,7 +14,9 @@
 <br>
 [Philip Torr](https://eng.ox.ac.uk/people/philip-torr/), [Christian Rupprecht](https://chrirupp.github.io/), [Varun Jampani](https://varunjampani.github.io/)
 <br>
-<sub>[Stability AI](https://stability.ai/), [University of Oxford](https://www.robots.ox.ac.uk/~vgg/), [UC Berkeley](https://bair.berkeley.edu/)</sub>
+<br>
+[Stability AI](https://stability.ai/), [University of Oxford](https://www.robots.ox.ac.uk/~vgg/), [UC Berkeley](https://bair.berkeley.edu/)
+
 </div>
 
 <p align="center">
@@ -27,11 +29,21 @@
 
 # Overview
 
-`Stable Virtual Camera (Seva)` is a 1.3B generalist diffusion model for Novel View Synthesis (NVS), generating 3D consistent novel views of a scene, given any number of input views and target cameras.
+`Stable Virtual Camera (SEVA)` is a generalist diffusion model for Novel View Synthesis (NVS), generating 3D consistent novel views of a scene, given any number of input views and target cameras.
 
 # :tada: News
 
+- June 2025 - Release v`1.1` model checkpoint.
 - March 2025 - `Stable Virtual Camera` is out everywhere.
+
+# :gear: Versions
+
+| Model Version | \#Parameter | Resolution |                                               Download Link                                                |                                           Update Notes                                           |
+| :-----------: | :---------: | :--------: | :--------------------------------------------------------------------------------------------------------: | :----------------------------------------------------------------------------------------------: |
+|     `1.1`     |    1.3B     |    576P    | 🤗 [Huggingface](https://huggingface.co/stabilityai/stable-virtual-camera/blob/main/modelv1.1.safetensors) | Fixing known issues of foreground objects sometimes being detached from the background in v`1.0` |
+|     `1.0`     |    1.3B     |    576P    |   🤗 [Huggingface](https://huggingface.co/stabilityai/stable-virtual-camera/blob/main/model.safetensors)   |                                         Initial release                                          |
+
+You can specify the version via, for example, `load_model(..., model_version=1.1)` in the script.
 
 # :wrench: Installation
 
@@ -83,7 +95,7 @@ For users interested in benchmarking NVS models using command lines, check [`ben
 
 # :question: Q&A
 
-- Training script? See issue https://github.com/Stability-AI/stable-virtual-camera/issues/27, https://github.com/Stability-AI/stable-virtual-camera/issues/42.
+- Training script? See issue https://github.com/Stability-AI/stable-virtual-camera/issues/27, https://github.com/Stability-AI/stable-virtual-camera/issues/42. [@nviolante25](https://www.github.com/nviolante25) has made a pull request (https://github.com/Stability-AI/stable-virtual-camera/pull/51) based on the dicussions.
 - License for the output? See issue https://github.com/Stability-AI/stable-virtual-camera/issues/26. The output follows the same non-commercial license.
 
 # :books: Citing

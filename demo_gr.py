@@ -44,7 +44,7 @@ from seva.model import SGMWrapper
 from seva.modules.autoencoder import AutoEncoder
 from seva.modules.conditioner import CLIPConditioner
 from seva.modules.preprocessor import Dust3rPipeline
-from seva.sampling import DDPMDiscretization, DiscreteDenoiser
+from seva.sampling import DiscreteDenoiser
 from seva.utils import load_model
 
 device = "cuda:0"
@@ -109,8 +109,7 @@ DUST3R = Dust3rPipeline(device=device)  # type: ignore
 MODEL = SGMWrapper(load_model(device="cpu", verbose=True).eval()).to(device)
 AE = AutoEncoder(chunk_size=1).to(device)
 CONDITIONER = CLIPConditioner().to(device)
-DISCRETIZATION = DDPMDiscretization()
-DENOISER = DiscreteDenoiser(discretization=DISCRETIZATION, num_idx=1000, device=device)
+DENOISER = DiscreteDenoiser(num_idx=1000, device=device)
 VERSION_DICT = {
     "H": 576,
     "W": 576,
@@ -853,7 +852,9 @@ def main(server_port: int | None = None, share: bool = True):
                     with gr.Column():
                         with gr.Group():
                             # Initially disable the Preprocess Images button until an image is selected.
-                            preprocess_btn = gr.Button("Preprocess images", interactive=False)
+                            preprocess_btn = gr.Button(
+                                "Preprocess images", interactive=False
+                            )
                             preprocess_progress = gr.Textbox(
                                 label="",
                                 visible=False,
@@ -1059,7 +1060,9 @@ def main(server_port: int | None = None, share: bool = True):
                     with gr.Column():
                         with gr.Group():
                             # Initially disable the Preprocess Images button until images are selected.
-                            preprocess_btn = gr.Button("Preprocess images", interactive=False)
+                            preprocess_btn = gr.Button(
+                                "Preprocess images", interactive=False
+                            )
                             preprocess_progress = gr.Textbox(
                                 label="",
                                 visible=False,
@@ -1120,7 +1123,7 @@ def main(server_port: int | None = None, share: bool = True):
                                     gr.update(visible=False),
                                     gr.update(visible=False),
                                     gr.update(visible=True),
-                                    gr.update(interactive=bool(x))
+                                    gr.update(interactive=bool(x)),
                                 ),
                                 inputs=[example_imgs_expander],
                                 outputs=[
@@ -1129,7 +1132,7 @@ def main(server_port: int | None = None, share: bool = True):
                                     example_imgs_confirmer,
                                     example_imgs_backer,
                                     example_imgs,
-                                    preprocess_btn
+                                    preprocess_btn,
                                 ],
                             )
                             example_imgs_backer.click(
