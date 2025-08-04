@@ -28,6 +28,7 @@ from seva.sampling import (
     VanillaCFG,
 )
 from seva.utils import seed_everything
+from seva.vggt import VGGTObjective
 
 try:
     # Check if version string contains 'dev' or 'nightly'
@@ -1234,12 +1235,14 @@ def do_sample(
     global_pbar=None,
     **_,
 ):
+    input_image_folder = cfg['input_image_folder']
     imgs = value_dict["cond_frames"].to("cuda")
     input_masks = value_dict["cond_frames_mask"].to("cuda")
     pluckers = value_dict["plucker_coordinate"].to("cuda")
 
     num_samples = [1, T]
-    with torch.inference_mode(), torch.autocast("cuda"):
+    # with torch.inference_mode(), torch.autocast("cuda"):
+    with torch.no_grad(), torch.autocast("cuda"):
         load_model(ae)
         load_model(conditioner)
         latents = torch.nn.functional.pad(
@@ -1279,7 +1282,9 @@ def do_sample(
             "concat": uc_concat,
             "dense_vector": uc_dense_vector,
         }
-        unload_model(ae)
+        
+        # Keep AE loaded for the callback to decode latents
+        # unload_model(ae)
         unload_model(conditioner)
 
         additional_model_inputs = {"num_frames": T}
@@ -1293,30 +1298,46 @@ def do_sample(
 
         shape = (math.prod(num_samples), C, H // F, W // F)
         randn = torch.randn(shape).to("cuda")
+    
+    vggt_opt = VGGTObjective(
+        input_image_folder,
+        ae,
+        device="cuda",
+    )
+    
+    # call sampler OUTSIDE no_grad so callback can compute grads
+    load_model(model)
+    samples_z = sampler(
+        lambda input, sigma, c: denoiser(
+            model,
+            input,
+            sigma,
+            c,
+            **additional_model_inputs,
+        ),
+        randn,
+        scale=cfg,
+        cond=c,
+        uc=uc,
+        verbose=verbose, 
+        **additional_sampler_inputs,
+        step_callback=vggt_opt.__call__(),
+        step_callback_kwargs={
+            "ae": ae,
+            "decoding_t": decoding_t,
+            "value_dict": value_dict,
+            "H": H,
+            "W": W,
+        },
+    )
+    unload_model(model)
+    
+    if samples_z is None:
+        return
 
-        load_model(model)
-        samples_z = sampler(
-            lambda input, sigma, c: denoiser(
-                model,
-                input,
-                sigma,
-                c,
-                **additional_model_inputs,
-            ),
-            randn,
-            scale=cfg,
-            cond=c,
-            uc=uc,
-            verbose=verbose,
-            **additional_sampler_inputs,
-        )
-        if samples_z is None:
-            return
-        unload_model(model)
-
-        load_model(ae)
+    with torch.no_grad(), torch.autocast("cuda"):
         samples = ae.decode(samples_z, decoding_t)
-        unload_model(ae)
+    unload_model(ae)
 
     return samples
 

@@ -367,15 +367,27 @@ class EulerEDMSampler(object):
         dt = append_dims(next_sigma - sigma_hat, x.ndim)
         return x + dt * d
 
-    def __call__(
-        self,
-        denoiser,
-        x: torch.Tensor,
+    # def __call__(
+    #     self,
+    #     denoiser,
+    #     x: torch.Tensor,
+    #     scale: float | torch.Tensor,
+    #     cond: dict,
+    #     uc: dict | None = None,
+    #     num_steps: int | None = None,
+    #     verbose: bool = True,
+    #     **guider_kwargs,
+    # ) -> torch.Tensor:
+    def __call__(self, 
+        denoiser, 
+        x: torch.Tensor, 
         scale: float | torch.Tensor,
-        cond: dict,
-        uc: dict | None = None,
+        cond: dict, 
+        uc: dict | None = None, 
         num_steps: int | None = None,
         verbose: bool = True,
+        step_callback=None,
+        step_callback_kwargs=None,
         **guider_kwargs,
     ) -> torch.Tensor:
         uc = cond if uc is None else uc
@@ -402,4 +414,10 @@ class EulerEDMSampler(object):
                 gamma,
                 **guider_kwargs,
             )
+
+            # update the latent with optimization step
+            if step_callback is not None:
+                kw = step_callback_kwargs or {}
+                x = step_callback(x=x, sigma=sigmas[i + 1], step=i, **kw)
+
         return x
