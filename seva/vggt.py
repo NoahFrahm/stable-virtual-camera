@@ -119,5 +119,111 @@ class VGGTObjective:
         with torch.no_grad():
             x = (x - self.step_size * grad / norm).detach()
         return x
-    
 
+
+# NOTE: if needed it is available here
+# def preprocess_latent_tensors(
+#         imgs: Union[torch.Tensor, List[torch.Tensor]],
+#         *,                       # keyword-only for clarity
+#         mode: str = "crop",      # "crop" (default) or "pad"
+#         target_size: int = 518,  # longest dimension ≤ 518 after resize
+#         patch: int = 14,         # make H and W multiples of 14
+# ) -> torch.Tensor:
+#     """
+#     Pre-process decoded latent RGB tensors for VGGT.
+
+#     Args
+#     ----
+#     imgs : Tensor or list[Tensor]
+#         • Single tensor  (3,H,W)  or  (N,3,H,W)  
+#         • or list of tensors, each  (3,H,W)
+#         Values may be in [-1,1] (as from VAE decode) or [0,1].
+
+#     mode : {"crop","pad"}
+#         Identical semantics to the file-based helper:
+#         - "crop": isotropically resize so **width == 518 px**,
+#                   then centre-crop height if it exceeds 518 px.
+#         - "pad" : isotropically resize so **long side == 518 px**,
+#                   then pad the short side with white (1.0) to square.
+
+#     target_size : int
+#         Maximum size after resize (default 518 px).
+
+#     patch : int
+#         Final H and W are forced to be multiples of this value (14).
+
+#     Returns
+#     -------
+#     torch.Tensor  with shape (N, 3, H', W')
+#     """
+
+#     if isinstance(imgs, torch.Tensor):
+#         imgs = [imgs] if imgs.dim() == 3 else list(imgs)  # (3,H,W) or (N,3,H,W)
+#     if len(imgs) == 0:
+#         raise ValueError("At least one tensor is required")
+
+#     if mode not in {"crop", "pad"}:
+#         raise ValueError('mode must be "crop" or "pad"')
+
+#     processed = []
+#     for im in imgs:
+#         if im.min() < 0: # latent decode gives [-1,1]
+#             im = (im.clamp(-1, 1) + 1) / 2  # -> [0,1]
+
+#         # ensure float32 (AMP will cast later)
+#         im = im.float()
+
+#         C, H, W = im.shape
+#         long_side = max(H, W)
+
+#         # Resize to target size while maintaining aspect ratio
+#         if mode == "crop":
+#             new_W = target_size
+#             scale = new_W / W
+#             new_H = round(H * scale)
+#         else: # "pad"
+#             if long_side > target_size:
+#                 scale = target_size / long_side
+#                 new_H = round(H * scale)
+#                 new_W = round(W * scale)
+#             else:
+#                 new_H, new_W = H, W
+
+#         # keep result divisible by 14 px
+#         new_H = ((new_H + patch - 1) // patch) * patch
+#         new_W = ((new_W + patch - 1) // patch) * patch
+
+#         if (new_H, new_W) != (H, W):
+#             im = F.interpolate(
+#                 im.unsqueeze(0), (new_H, new_W),
+#                 mode="bilinear", align_corners=False, antialias=True
+#             ).squeeze(0)
+
+#         # Crop or pad to square ----------
+#         if mode == "crop":
+#             if new_H > target_size:
+#                 top = (new_H - target_size) // 2
+#                 im = im[:, top:top+target_size, :]
+#         else:  # "pad"
+#             pad_H = target_size - im.shape[1]
+#             pad_W = target_size - im.shape[2]
+#             if pad_H > 0 or pad_W > 0:
+#                 pad_top, pad_bottom = pad_H // 2, pad_H - pad_H // 2
+#                 pad_left, pad_right = pad_W // 2, pad_W - pad_W // 2
+#                 # constant-value padding with 1.0 (white)
+#                 im = F.pad(
+#                     im, (pad_left, pad_right, pad_top, pad_bottom),
+#                     mode="constant", value=1.0
+#                 )
+
+#         # Final divisibility by patch
+#         Hf, Wf = im.shape[-2:]
+#         pad_H = (patch - Hf % patch) % patch
+#         pad_W = (patch - Wf % patch) % patch
+#         if pad_H or pad_W:
+#             im = F.pad(im, (0, pad_W, 0, pad_H), mode="constant", value=1.0)
+
+#         processed.append(im)
+
+#     images = torch.stack(processed, 0)
+#     return images
