@@ -70,6 +70,7 @@ VERSION_DICT = {
     "H": 576,
     "W": 576,
     "T": 21,
+    # "T": 3,
     "C": 4,
     "f": 8,
     "options": {"save_first_pass": True},

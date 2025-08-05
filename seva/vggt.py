@@ -23,7 +23,8 @@ class VGGTObjective:
         ae, # SEVA autoencoder (with .decode)
         rel_gt: torch.Tensor, # (N_in,4,4) GT relative w2c from gen->input_i
         decoding_t: int = 1,
-        warmup: int = 2,
+        # warmup: int = 2,
+        warmup: int = 0,
         every: int = 2,
         step_size: float = 0.05,
         device: str = None,
@@ -51,11 +52,11 @@ class VGGTObjective:
         self.every = every
         self.step_size = step_size
         self.images = images
-        self.relative_transform_gt = rel_gt
+        self.relative_transform_gt = rel_gt[0].to(device)
 
     @staticmethod
     def _relative_transform(E1: torch.Tensor, E2: torch.Tensor) -> torch.Tensor:
-        """Given two 4×4 w2c poses, return the relative w2c_j @ inv(w2c_i)."""
+        """Given two 4x4 w2c poses, return the relative w2c_j @ inv(w2c_i)."""
         return E2 @ torch.linalg.inv(E1)
 
     @staticmethod
@@ -67,17 +68,23 @@ class VGGTObjective:
 
     @staticmethod
     def _translation_error(E_pred: torch.Tensor, E_tgt: torch.Tensor) -> torch.Tensor:
-        """Squared translation error on camera centers: C = –R^T t."""
+        """Squared translation error on camera centers: C = -R^T t."""
         R_pred, t_pred = E_pred[:3, :3], E_pred[:3, 3:4]
         R_tgt, t_tgt     = E_tgt[:3, :3], E_tgt[:3, 3:4]
         C_p = -(R_pred.transpose(-1, -2) @ t_pred)
         C_t = -(R_tgt.transpose(-1, -2) @ t_tgt)
         return (C_p - C_t).pow(2).sum()
     
+    @staticmethod
+    def _to_homogeneous(E):
+        bottom = torch.tensor([[0, 0, 0, 1.]], device=E.device, dtype=E.dtype)
+        return torch.cat([E, bottom], dim=0) # (4,4)
+    
     def preprocess_images(self, decoded_latent):
         processed_decoded_latent = preprocess_latent_tensors(decoded_latent)
-        input_images = self.images.to(self.device, dtype=self.dtype)
         generated_images = processed_decoded_latent.to(self.device, dtype=self.dtype)
+        input_images = self.images.to(self.device, dtype=self.dtype)
+
         all_images = torch.cat([input_images, generated_images], dim=0)
 
         return all_images
@@ -103,17 +110,23 @@ class VGGTObjective:
                 aggregated_tokens_list, _ = self.model.aggregator(images)
             pose_enc = self.model.camera_head(aggregated_tokens_list)[-1]
             extrinsic, _ = pose_encoding_to_extri_intri(pose_enc, images.shape[-2:])
+            extrinsic = extrinsic[0]
             print(f"Step {step}: extrinsic shape: {extrinsic.shape}")
 
         # Compute total relative‐transform loss
         total_loss = torch.tensor(0.0, device=self.device)
         for i in range(extrinsic.shape[0] - 1):
-            E_rel_pred = self._relative_transform(extrinsic[i], extrinsic[-1])
+            E_input, E_gen = self._to_homogeneous(extrinsic[i]), self._to_homogeneous(extrinsic[-1])
+            E_rel_pred = self._relative_transform(E_input, E_gen)
             rot_err   = self._rotation_error(E_rel_pred[:3, :3], self.relative_transform_gt[:3, :3])
             trans_err = self._translation_error(E_rel_pred, self.relative_transform_gt)
             total_loss = total_loss + rot_err + trans_err
+            break
 
         loss = total_loss / len(self.relative_transform_gt)
+
+        print("loss computation done")
+        breakpoint()
 
         # Backprop -> latent update
         grad, = torch.autograd.grad(loss, x)

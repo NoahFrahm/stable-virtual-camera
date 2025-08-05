@@ -1303,7 +1303,8 @@ def do_sample(
     rel_gt[:, :3, 3] = torch.tensor([[0.1,0,0],
                                     [0,0.1,0],
                                     [0,0,0.1]])
-    pose_cb = VGGTObjective(input_image_folder, rel_gt, ae, device="cuda")
+    # rel_gt.to("cuda")
+    pose_cb = VGGTObjective(input_image_folder, ae, rel_gt, device="cuda")
 
     with torch.no_grad(), torch.autocast("cuda"):
         load_model(model)
@@ -1324,6 +1325,7 @@ def do_sample(
             **additional_sampler_inputs,
             step_callback=pose_cb,
             step_callback_kwargs={
+                # "warmup": 0,
                 "ae": ae,
                 "decoding_t": decoding_t,
                 "value_dict": value_dict,
