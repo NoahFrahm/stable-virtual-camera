@@ -10,6 +10,8 @@ if vggt_repo_path not in sys.path: sys.path.insert(0, vggt_repo_path)
 
 import torch
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint_sequential, checkpoint
+from torch.autograd.forward_ad import dual_level, make_dual
 
 from vggt.models.vggt import VGGT
 from vggt.utils.load_fn import load_and_preprocess_images, preprocess_latent_tensors
@@ -31,14 +33,16 @@ class VGGTObjective:
     ):
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
+        # print(self.dtype)
+        # self.dtype = torch.bfloat16
 
         # Autoencoder
         self.ae = ae
+        for p in self.ae.parameters():  p.requires_grad_(False)
 
         # VGGT
         self.model = VGGT.from_pretrained("facebook/VGGT-1B").to(self.device)
-        for p in self.model.parameters():
-            p.requires_grad_(False)
+        for p in self.model.parameters(): p.requires_grad_(False)
 
         # Input images
         image_names = []
@@ -89,7 +93,7 @@ class VGGTObjective:
 
         return all_images
 
-    def __call__(self, x: torch.Tensor, sigma: torch.Tensor, step: int, **kwargs) -> torch.Tensor:
+    def __call__(self, x: torch.Tensor, sigma: torch.Tensor, step: int, lr = 1e-2, **kwargs) -> torch.Tensor:
         # Skip early or infrequent steps
         if step < self.warmup or ((step + 1) % self.every) != 0:
             return x
@@ -97,42 +101,50 @@ class VGGTObjective:
         # Make latents a leaf
         x = x.detach().requires_grad_(True)
 
-        # Decode latent into image
-        decoded_latent = self.ae.decode(x, self.decoding_t).clamp(-1, 1)
+        # This runs your entire decode(x, t) without storing intermediates,
+        # then re-runs it on backward to get grads w.r.t. x.
+        with torch.enable_grad(), torch.cuda.amp.autocast(dtype=self.dtype):
+            # Auto encoder
+            decoded = checkpoint(self.ae.decode, x, self.decoding_t, use_reentrant=False)
+            images = self.preprocess_images(decoded)[None]
 
-        # preprocess decoded latent
-        images = self.preprocess_images(decoded_latent)
-        
-        # VGGT forward
-        with torch.no_grad():
-            with torch.cuda.amp.autocast(dtype=self.dtype):
-                images = images[None]  # add batch dimension
-                aggregated_tokens_list, _ = self.model.aggregator(images)
+            print("images shape:", images.shape)
+
+            # VGGT forward
+            # aggregated_tokens_list, _ = checkpoint(self.model.aggregator, images)
+            aggregated_tokens_list, _ = self.model.aggregator(images)
+
+            # Compute loss
             pose_enc = self.model.camera_head(aggregated_tokens_list)[-1]
             extrinsic, _ = pose_encoding_to_extri_intri(pose_enc, images.shape[-2:])
             extrinsic = extrinsic[0]
             print(f"Step {step}: extrinsic shape: {extrinsic.shape}")
+            
+            # Compute total relative‐transform loss
+            total_loss = 0.0
+            for i in range(extrinsic.shape[0] - 1):
+                E_input, E_gen = self._to_homogeneous(extrinsic[i]), self._to_homogeneous(extrinsic[-1])
+                E_rel_pred = self._relative_transform(E_input, E_gen)
+                rot_err   = self._rotation_error(E_rel_pred[:3, :3], self.relative_transform_gt[:3, :3])
+                trans_err = self._translation_error(E_rel_pred, self.relative_transform_gt)
+                total_loss = total_loss + rot_err + trans_err
+                break
 
-        # Compute total relative‐transform loss
-        total_loss = torch.tensor(0.0, device=self.device)
-        for i in range(extrinsic.shape[0] - 1):
-            E_input, E_gen = self._to_homogeneous(extrinsic[i]), self._to_homogeneous(extrinsic[-1])
-            E_rel_pred = self._relative_transform(E_input, E_gen)
-            rot_err   = self._rotation_error(E_rel_pred[:3, :3], self.relative_transform_gt[:3, :3])
-            trans_err = self._translation_error(E_rel_pred, self.relative_transform_gt)
-            total_loss = total_loss + rot_err + trans_err
-            break
-
-        loss = total_loss / len(self.relative_transform_gt)
-
-        print("loss computation done")
-        breakpoint()
+            loss = total_loss / len(self.relative_transform_gt)
+            print("\ngradients enabled")
+            print("Tokens:", aggregated_tokens_list[0].requires_grad)
+            print("pose_enc:", pose_enc.requires_grad)
+            print("extrinsic:", extrinsic.requires_grad)
+            print("Loss:", loss.requires_grad)
 
         # Backprop -> latent update
-        grad, = torch.autograd.grad(loss, x)
-        norm = grad.norm().detach().clamp_min(1e-8)
+        loss.backward()
         with torch.no_grad():
-            x = (x - self.step_size * grad / norm).detach()
+            x -= lr * x.grad # gradient descent step
+        x.grad.zero_() # clear grad for the next iteration
+
+        breakpoint()
+
         return x
 
 
