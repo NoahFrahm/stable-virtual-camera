@@ -1,19 +1,27 @@
-import torch
-from vggt.models.vggt import VGGT
-from vggt.utils.load_fn import load_and_preprocess_images, preprocess_latent_tensors
 import os
+import sys
 
+vggt_repo = "/playpen-nas-ssd4/nofrahm/Multi-View-Gen/vggt"
+vggt_repo_path = os.path.abspath(vggt_repo)
+if not os.path.isdir(vggt_repo_path):
+    raise RuntimeError(f"vggt path not found: {vggt_repo_path}")
+if vggt_repo_path not in sys.path: sys.path.insert(0, vggt_repo_path)
 
 
 import torch
 import torch.nn.functional as F
+
+from vggt.models.vggt import VGGT
+from vggt.utils.load_fn import load_and_preprocess_images, preprocess_latent_tensors
 from vggt.utils.pose_enc import pose_encoding_to_extri_intri
+
 
 class VGGTObjective:
     def __init__(
         self,
         input_image_folder, # Path to folder with input images
         ae, # SEVA autoencoder (with .decode)
+        rel_gt: torch.Tensor, # (N_in,4,4) GT relative w2c from gen->input_i
         decoding_t: int = 1,
         warmup: int = 2,
         every: int = 2,
@@ -24,10 +32,12 @@ class VGGTObjective:
         self.dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
 
         # Autoencoder
-        self.ae = ae.to(self.device).eval()
+        self.ae = ae
 
         # VGGT
         self.model = VGGT.from_pretrained("facebook/VGGT-1B").to(self.device)
+        for p in self.model.parameters():
+            p.requires_grad_(False)
 
         # Input images
         image_names = []
@@ -41,14 +51,7 @@ class VGGTObjective:
         self.every = every
         self.step_size = step_size
         self.images = images
-
-    def _compute_all_relative(self, w2c: torch.Tensor):
-        """Compute E_rel = E2 @ E1^{-1} for each consecutive pair."""
-        rels = []
-        for i in range(w2c.shape[0] - 1):
-            E1, E2 = w2c[i], w2c[i + 1]
-            rels.append(self._relative_transform(E1, E2))
-        return rels
+        self.relative_transform_gt = rel_gt
 
     @staticmethod
     def _relative_transform(E1: torch.Tensor, E2: torch.Tensor) -> torch.Tensor:
@@ -72,13 +75,12 @@ class VGGTObjective:
         return (C_p - C_t).pow(2).sum()
     
     def preprocess_images(self, decoded_latent):
-        # Preprocess decoded latent
         processed_decoded_latent = preprocess_latent_tensors(decoded_latent)
+        input_images = self.images.to(self.device, dtype=self.dtype)
+        generated_images = processed_decoded_latent.to(self.device, dtype=self.dtype)
+        all_images = torch.cat([input_images, generated_images], dim=0)
 
-        # Combine processed latents and input images
-        all_images = torch.cat([self.images, processed_decoded_latent], dim=0)
-
-        return all_images        
+        return all_images
 
     def __call__(self, x: torch.Tensor, sigma: torch.Tensor, step: int, **kwargs) -> torch.Tensor:
         # Skip early or infrequent steps
@@ -101,19 +103,19 @@ class VGGTObjective:
                 aggregated_tokens_list, _ = self.model.aggregator(images)
             pose_enc = self.model.camera_head(aggregated_tokens_list)[-1]
             extrinsic, _ = pose_encoding_to_extri_intri(pose_enc, images.shape[-2:])
-
+            print(f"Step {step}: extrinsic shape: {extrinsic.shape}")
 
         # Compute total relative‐transform loss
         total_loss = torch.tensor(0.0, device=self.device)
-        for i, E_rel_tgt in enumerate(self.rel_targets):
-            E_rel_pred = self._relative_transform(extrinsic[i], extrinsic[i + 1])
-            rot_err   = self._rotation_error(E_rel_pred[:3, :3], E_rel_tgt[:3, :3])
-            trans_err = self._translation_error(E_rel_pred, E_rel_tgt)
+        for i in range(extrinsic.shape[0] - 1):
+            E_rel_pred = self._relative_transform(extrinsic[i], extrinsic[-1])
+            rot_err   = self._rotation_error(E_rel_pred[:3, :3], self.relative_transform_gt[:3, :3])
+            trans_err = self._translation_error(E_rel_pred, self.relative_transform_gt)
             total_loss = total_loss + rot_err + trans_err
 
-        loss = total_loss / len(self.rel_targets)
+        loss = total_loss / len(self.relative_transform_gt)
 
-        # Backprop → latent update
+        # Backprop -> latent update
         grad, = torch.autograd.grad(loss, x)
         norm = grad.norm().detach().clamp_min(1e-8)
         with torch.no_grad():

@@ -1,5 +1,20 @@
 import glob
 import os
+
+os.environ["TRANSFORMERS_VERBOSITY"] = "error"  # disable warning
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+os.environ["HABITAT_SIM_LOG"] = (
+    "quiet"  # https://aihabitat.org/docs/habitat-sim/logging.html
+)
+os.environ["MAGNUM_LOG"] = "quiet"
+
+DISK = "/playpen-nas-ssd4/nofrahm/Multi-View-Gen/model_weights"
+# os.environ["HF_HOME"] = DISK # hub + token
+os.environ["HUGGINGFACE_HUB_CACHE"] = f"{DISK}/hub" # repos
+os.environ["TRANSFORMERS_CACHE"] = f"{DISK}/transformers" # model weights
+os.environ["HF_DATASETS_CACHE"] = f"{DISK}/datasets" # Arrow datasets
+os.environ["TORCH_HOME"] = f"{DISK}/torch" # torch-hub models
+
 import os.path as osp
 
 import fire

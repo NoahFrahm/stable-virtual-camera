@@ -397,6 +397,8 @@ class EulerEDMSampler(object):
             uc,
             num_steps,
         )
+        
+        print("sampling begin")
         for i in self.get_sigma_gen(num_sigmas, verbose=verbose):
             gamma = (
                 min(self.s_churn / (num_sigmas - 1), 2**0.5 - 1)
@@ -416,8 +418,10 @@ class EulerEDMSampler(object):
             )
 
             # update the latent with optimization step
+            breakpoint()
             if step_callback is not None:
                 kw = step_callback_kwargs or {}
                 x = step_callback(x=x, sigma=sigmas[i + 1], step=i, **kw)
 
         return x
+

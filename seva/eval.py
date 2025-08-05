@@ -1235,7 +1235,6 @@ def do_sample(
     global_pbar=None,
     **_,
 ):
-    input_image_folder = cfg['input_image_folder']
     imgs = value_dict["cond_frames"].to("cuda")
     input_masks = value_dict["cond_frames_mask"].to("cuda")
     pluckers = value_dict["plucker_coordinate"].to("cuda")
@@ -1299,38 +1298,40 @@ def do_sample(
         shape = (math.prod(num_samples), C, H // F, W // F)
         randn = torch.randn(shape).to("cuda")
     
-    vggt_opt = VGGTObjective(
-        input_image_folder,
-        ae,
-        device="cuda",
-    )
-    
-    # call sampler OUTSIDE no_grad so callback can compute grads
-    load_model(model)
-    samples_z = sampler(
-        lambda input, sigma, c: denoiser(
-            model,
-            input,
-            sigma,
-            c,
-            **additional_model_inputs,
-        ),
-        randn,
-        scale=cfg,
-        cond=c,
-        uc=uc,
-        verbose=verbose, 
-        **additional_sampler_inputs,
-        step_callback=vggt_opt.__call__(),
-        step_callback_kwargs={
-            "ae": ae,
-            "decoding_t": decoding_t,
-            "value_dict": value_dict,
-            "H": H,
-            "W": W,
-        },
-    )
-    unload_model(model)
+    input_image_folder = '/playpen-nas-ssd4/nofrahm/Multi-View-Gen/data/dev-test'
+    rel_gt = torch.eye(4).unsqueeze(0).repeat(3,1,1)      # identity for demo
+    rel_gt[:, :3, 3] = torch.tensor([[0.1,0,0],
+                                    [0,0.1,0],
+                                    [0,0,0.1]])
+    pose_cb = VGGTObjective(input_image_folder, rel_gt, ae, device="cuda")
+
+    with torch.no_grad(), torch.autocast("cuda"):
+        load_model(model)
+        # call sampler OUTSIDE no_grad so callback can compute grads
+        samples_z = sampler(
+            lambda input, sigma, c: denoiser(
+                model,
+                input,
+                sigma,
+                c,
+                **additional_model_inputs,
+            ),
+            randn,
+            scale=cfg,
+            cond=c,
+            uc=uc,
+            verbose=verbose, 
+            **additional_sampler_inputs,
+            step_callback=pose_cb,
+            step_callback_kwargs={
+                "ae": ae,
+                "decoding_t": decoding_t,
+                "value_dict": value_dict,
+                "H": H,
+                "W": W,
+            },
+        )
+        unload_model(model)
     
     if samples_z is None:
         return
